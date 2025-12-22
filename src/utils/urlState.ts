@@ -3,43 +3,42 @@ export interface PlayerState {
   searchQuery?: string;
   videoUrl?: string;
   videoId?: string;
-  startTime: number;
-  endTime: number;
-  isPlaying: boolean;
+  startTime?: number;
+  endTime?: number;
 }
 
 export interface GridState {
   players: PlayerState[];
 }
 
-export function serializeStateToURL(state: GridState): void {
-  try {
-    const encoded = btoa(JSON.stringify(state));
-    const url = new URL(window.location.href);
-    url.searchParams.set('state', encoded);
-    window.history.replaceState({}, '', url.toString());
-  } catch (error) {
-    console.error('Failed to serialize state to URL:', error);
-  }
+const STATE_KEY = 'grid';
+
+export function serializeGridState(players: PlayerState[]): string {
+  const state: GridState = { players };
+  return btoa(JSON.stringify(state));
 }
 
-export function deserializeStateFromURL(): GridState | null {
+export function deserializeGridState(encoded: string): GridState | null {
   try {
-    const url = new URL(window.location.href);
-    const encoded = url.searchParams.get('state');
-    if (!encoded) return null;
-    
     const decoded = atob(encoded);
-    return JSON.parse(decoded) as GridState;
-  } catch (error) {
-    console.error('Failed to deserialize state from URL:', error);
+    const state = JSON.parse(decoded) as GridState;
+    return state;
+  } catch {
     return null;
   }
 }
 
-export function clearURLState(): void {
+export function getStateFromURL(): GridState | null {
+  const params = new URLSearchParams(window.location.search);
+  const encoded = params.get(STATE_KEY);
+  if (!encoded) return null;
+  return deserializeGridState(encoded);
+}
+
+export function setStateInURL(state: GridState): void {
+  const encoded = serializeGridState(state.players);
   const url = new URL(window.location.href);
-  url.searchParams.delete('state');
+  url.searchParams.set(STATE_KEY, encoded);
   window.history.replaceState({}, '', url.toString());
 }
 

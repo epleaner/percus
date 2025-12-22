@@ -1,61 +1,55 @@
-import { Component, createSignal, For, onMount } from 'solid-js';
+import { Component, createSignal, For, onMount, createEffect } from 'solid-js';
 import YouTubePlayer from './YouTubePlayer';
-import { serializeStateToURL, deserializeStateFromURL, type PlayerState, type GridState } from '../utils/urlState';
+import { getStateFromURL, setStateInURL, type PlayerState } from '../utils/urlState';
 
 interface VideoGridProps {}
 
 const VideoGrid: Component<VideoGridProps> = () => {
-  const [playerStates, setPlayerStates] = createSignal<PlayerState[]>([]);
-
-  // Load state from URL on mount
-  onMount(() => {
-    const savedState = deserializeStateFromURL();
-    if (savedState && savedState.players.length > 0) {
-      setPlayerStates(savedState.players);
-    } else {
-      // Default: one empty player
-      setPlayerStates([{
-        playerId: 0,
-        startTime: 0,
-        endTime: 0,
-        isPlaying: false,
-      }]);
-    }
-  });
+  // Load initial state from URL
+  const urlState = getStateFromURL();
+  const initialPlayerIds = urlState?.players.map(p => p.playerId) || [0];
+  const [playerIds, setPlayerIds] = createSignal<number[]>(initialPlayerIds);
+  const [playerStates, setPlayerStates] = createSignal<Map<number, PlayerState>>(new Map());
 
   const addPlayer = () => {
-    const states = playerStates();
-    const newId = states.length > 0 ? Math.max(...states.map(s => s.playerId)) + 1 : 0;
-    const newState: PlayerState = {
-      playerId: newId,
-      startTime: 0,
-      endTime: 0,
-      isPlaying: false,
-    };
-    const updated = [...states, newState];
-    setPlayerStates(updated);
-    saveStateToURL(updated);
+    const ids = playerIds();
+    const newId = Math.max(...ids, -1) + 1;
+    setPlayerIds([...ids, newId]);
   };
 
   const removePlayer = (id: number) => {
-    const states = playerStates();
-    if (states.length > 1) {
-      const updated = states.filter(s => s.playerId !== id);
-      setPlayerStates(updated);
-      saveStateToURL(updated);
+    const ids = playerIds();
+    if (ids.length > 1) {
+      setPlayerIds(ids.filter(pid => pid !== id));
+      const states = playerStates();
+      states.delete(id);
+      setPlayerStates(new Map(states));
+      updateURL();
     }
   };
 
-  const handlePlayerStateChange = (playerId: number, state: PlayerState) => {
+  const handlePlayerStateChange = (state: PlayerState) => {
     const states = playerStates();
-    const updated = states.map(s => s.playerId === playerId ? state : s);
-    setPlayerStates(updated);
-    saveStateToURL(updated);
+    states.set(state.playerId, state);
+    setPlayerStates(new Map(states));
+    updateURL();
   };
 
-  const saveStateToURL = (states: PlayerState[]) => {
-    serializeStateToURL({ players: states });
+  const updateURL = () => {
+    const states = Array.from(playerStates().values());
+    setStateInURL({ players: states });
   };
+
+  // Initialize player states from URL
+  onMount(() => {
+    if (urlState) {
+      const statesMap = new Map<number, PlayerState>();
+      urlState.players.forEach(state => {
+        statesMap.set(state.playerId, state);
+      });
+      setPlayerStates(statesMap);
+    }
+  });
 
   return (
     <div class="flex flex-col h-full w-full p-6 gap-4">
@@ -67,23 +61,23 @@ const VideoGrid: Component<VideoGridProps> = () => {
       </div>
       
       <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 flex-1 overflow-y-auto pb-4">
-        <For each={playerStates()}>
-          {(state) => (
+        <For each={playerIds()}>
+          {(id) => (
             <div class="flex flex-col border border-border rounded p-3 bg-bg-subtle min-h-0 h-fit">
               <div class="flex justify-end mb-1">
                 <button
-                  onClick={() => removePlayer(state.playerId)}
+                  onClick={() => removePlayer(id)}
                   class="text-xs text-fg-muted hover:text-fg px-2"
-                  disabled={playerStates().length === 1}
+                  disabled={playerIds().length === 1}
                 >
                   ×
                 </button>
               </div>
               <div class="flex-1 min-h-0">
-                <YouTubePlayer
-                  playerId={state.playerId}
-                  initialState={state}
-                  onStateChange={(newState) => handlePlayerStateChange(state.playerId, newState)}
+                <YouTubePlayer 
+                  playerId={id} 
+                  initialState={playerStates().get(id)}
+                  onStateChange={handlePlayerStateChange}
                 />
               </div>
             </div>

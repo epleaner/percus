@@ -19,18 +19,21 @@ declare global {
 }
 
 const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
-  const [videoUrl, setVideoUrl] = createSignal(props.initialState?.videoUrl || '');
-  const [videoId, setVideoId] = createSignal<string | null>(props.initialState?.videoId || null);
+  // Initialize from props or URL state (one-time read)
+  const initialState = props.initialState;
+  const [videoUrl, setVideoUrl] = createSignal(initialState?.videoUrl || '');
+  const [videoId, setVideoId] = createSignal<string | null>(initialState?.videoId || null);
   const [player, setPlayer] = createSignal<any>(null);
-  const [startTime, setStartTime] = createSignal(props.initialState?.startTime || 0);
-  const [endTime, setEndTime] = createSignal(props.initialState?.endTime || 0);
+  const [startTime, setStartTime] = createSignal(initialState?.startTime || 0);
+  const [endTime, setEndTime] = createSignal(initialState?.endTime || 0);
   const [videoDuration, setVideoDuration] = createSignal(0);
   const [isLooping, setIsLooping] = createSignal(true);
-  const [isPlaying, setIsPlaying] = createSignal(props.initialState?.isPlaying || false);
-  const [loopLength, setLoopLength] = createSignal(0);
+  const [isPlaying, setIsPlaying] = createSignal(false);
+  const [_loopLength, setLoopLength] = createSignal(0);
+  const [searchQuery, setSearchQuery] = createSignal(initialState?.searchQuery || '');
+  const [hasLoadedInitialState, setHasLoadedInitialState] = createSignal(!!initialState);
   const [isApiReady, setIsApiReady] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [searchQuery, setSearchQuery] = createSignal(props.initialState?.searchQuery || '');
   const [searchResults, setSearchResults] = createSignal<YouTubeSearchResult[]>([]);
   const [isSearching, setIsSearching] = createSignal(false);
   const [isLoadingMore, setIsLoadingMore] = createSignal(false);
@@ -38,7 +41,20 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
   const [sortOrder, setSortOrder] = createSignal<'asc' | 'desc'>('asc');
   const [nextPageToken, setNextPageToken] = createSignal<string | undefined>(undefined);
   const [currentThreshold, setCurrentThreshold] = createSignal<number | undefined>(undefined);
-  let resultsContainerRef: HTMLDivElement | undefined;
+
+  // Notify parent of state changes (for URL serialization)
+  const notifyStateChange = () => {
+    if (props.onStateChange) {
+      props.onStateChange({
+        playerId: props.playerId,
+        searchQuery: searchQuery(),
+        videoUrl: videoUrl(),
+        videoId: videoId() || undefined,
+        startTime: startTime(),
+        endTime: endTime(),
+      });
+    }
+  };
 
   // Extract video ID from YouTube URL
   const extractVideoId = (url: string): string | null => {
@@ -138,38 +154,33 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
           if (duration && duration > 0) {
             setVideoDuration(duration);
             
-            // Set random 1-5 second loop segment
-            const loopDuration = Math.floor(Math.random() * 5) + 1; // 1-5 seconds
-            const maxStart = Math.max(0, duration - loopDuration);
-            const randomStart = Math.floor(Math.random() * maxStart);
-            
-            // Ensure loop length is a multiple of 1 second
-            const roundedStart = Math.floor(randomStart);
-            const roundedEnd = roundedStart + loopDuration;
-            
-            // Use initial state if available, otherwise use random
-            const finalStart = props.initialState?.startTime !== undefined && props.initialState.startTime > 0
-              ? props.initialState.startTime
-              : roundedStart;
-            const finalEnd = props.initialState?.endTime !== undefined && props.initialState.endTime > 0
-              ? props.initialState.endTime
-              : Math.min(roundedEnd, duration);
-            
-            setStartTime(finalStart);
-            setEndTime(finalEnd);
-            setLoopLength(finalEnd - finalStart);
-            
-            // Seek to the start of the loop segment
-            ytPlayer.seekTo(finalStart, true);
-            
-            // If initial state says it should be playing, start playing
-            if (props.initialState?.isPlaying) {
-              setTimeout(() => {
-                globalPlaybackClock.play();
-              }, 100);
+            // Use initial state if available, otherwise set random 1-5 second loop segment
+            if (hasLoadedInitialState() && initialState?.startTime !== undefined && initialState?.endTime !== undefined) {
+              // Use initial state from URL
+              setStartTime(initialState.startTime);
+              setEndTime(Math.min(initialState.endTime, duration));
+              setLoopLength(initialState.endTime - initialState.startTime);
+              ytPlayer.seekTo(initialState.startTime, true);
+            } else {
+              // Set random 1-5 second loop segment
+              const loopDuration = Math.floor(Math.random() * 5) + 1; // 1-5 seconds
+              const maxStart = Math.max(0, duration - loopDuration);
+              const randomStart = Math.floor(Math.random() * maxStart);
+              
+              // Ensure loop length is a multiple of 1 second
+              const roundedStart = Math.floor(randomStart);
+              const roundedEnd = roundedStart + loopDuration;
+              
+              setStartTime(roundedStart);
+              setEndTime(Math.min(roundedEnd, duration));
+              setLoopLength(loopDuration);
+              
+              // Seek to the start of the loop segment
+              ytPlayer.seekTo(roundedStart, true);
+              
+              // Update URL state with new random range
+              notifyStateChange();
             }
-            
-            notifyStateChange();
             
           }
           // Auto-start looping
@@ -182,13 +193,11 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
           // YouTube player states: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (cued)
           if (event.data === window.YT.PlayerState.PLAYING) {
             setIsPlaying(true);
-            notifyStateChange();
             if (isLooping()) {
               checkLoop();
             }
           } else if (event.data === window.YT.PlayerState.PAUSED) {
             setIsPlaying(false);
-            notifyStateChange();
           } else if (event.data === window.YT.PlayerState.ENDED && isLooping()) {
             // Restart loop when video ends
             const start = startTime();
@@ -234,23 +243,8 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
     }
   };
 
-  // Notify parent of state changes
-  const notifyStateChange = () => {
-    if (props.onStateChange) {
-      props.onStateChange({
-        playerId: props.playerId,
-        searchQuery: searchQuery(),
-        videoUrl: videoUrl(),
-        videoId: videoId() || undefined,
-        startTime: startTime(),
-        endTime: endTime(),
-        isPlaying: isPlaying(),
-      });
-    }
-  };
-
   // Load video by ID
-  const loadVideoById = (id: string, preserveTimeRange: boolean = false) => {
+  const loadVideoById = (id: string) => {
     // Stop loop and destroy existing player
     stopLoopCheck();
     setIsPlaying(false);
@@ -265,7 +259,8 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
 
     setVideoId(id);
     setError(null);
-    if (!preserveTimeRange) {
+    // Only reset time range if not loading from initial state
+    if (!hasLoadedInitialState()) {
       setStartTime(0);
       setEndTime(0);
     }
@@ -273,6 +268,7 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
     setLoopLength(0);
     setShowSearchResults(false);
     setIsLooping(true);
+    setHasLoadedInitialState(false); // Reset flag after first load
     notifyStateChange();
   };
 
@@ -353,10 +349,10 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
   };
 
   // Handle infinite scroll
-  const handleScroll = () => {
-    if (!resultsContainerRef || isLoadingMore() || !nextPageToken()) return;
+  const handleScroll = (e: Event) => {
+    const container = e.currentTarget as HTMLDivElement;
+    if (isLoadingMore() || !nextPageToken()) return;
     
-    const container = resultsContainerRef;
     const scrollTop = container.scrollTop;
     const scrollHeight = container.scrollHeight;
     const clientHeight = container.clientHeight;
@@ -399,17 +395,6 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
         initializePlayer();
       }, 100);
       return () => clearTimeout(timer);
-    }
-  });
-
-  // Load video from initial state if provided
-  createEffect(() => {
-    if (props.initialState?.videoId && !videoId() && isApiReady()) {
-      const id = props.initialState.videoId;
-      const url = props.initialState.videoUrl || `https://www.youtube.com/watch?v=${id}`;
-      setVideoUrl(url);
-      setVideoId(id);
-      // Player will be initialized by the other effect
     }
   });
 
@@ -456,7 +441,10 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
               type="text"
               placeholder="Search for low-view videos..."
               value={searchQuery()}
-              onInput={(e) => setSearchQuery(e.currentTarget.value)}
+              onInput={(e) => {
+                setSearchQuery(e.currentTarget.value);
+                notifyStateChange();
+              }}
               onKeyPress={(e) => {
                 if (e.key === 'Enter') {
                   handleSearch();
@@ -466,7 +454,10 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
               disabled={isSearching()}
             />
             <button 
-              onClick={handleSearch} 
+              onClick={(e) => {
+                e.preventDefault();
+                handleSearch();
+              }}
               class="btn btn-primary"
               disabled={isSearching()}
             >
@@ -481,7 +472,10 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
             type="text"
             placeholder="Or enter YouTube URL"
             value={videoUrl()}
-            onInput={(e) => setVideoUrl(e.currentTarget.value)}
+            onInput={(e) => {
+              setVideoUrl(e.currentTarget.value);
+              notifyStateChange();
+            }}
             onKeyPress={(e) => {
               if (e.key === 'Enter') {
                 handleLoadVideo();
@@ -534,7 +528,6 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
               </div>
             </div>
             <div 
-              ref={resultsContainerRef}
               onScroll={handleScroll}
               class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 overflow-y-auto max-h-96"
             >
@@ -564,7 +557,10 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
             </div>
             <Show when={nextPageToken() && !isLoadingMore()}>
               <button
-                onClick={() => handleSearch(true)}
+                onClick={(e) => {
+                  e.preventDefault();
+                  handleSearch(true);
+                }}
                 class="btn btn-secondary w-full"
               >
                 Load More
@@ -591,12 +587,8 @@ const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
                     if (player() && isPlaying()) {
                       player().seekTo(value, true);
                     }
-                    notifyStateChange();
                   }}
-                  onEndChange={(value) => {
-                    setEndTime(value);
-                    notifyStateChange();
-                  }}
+                  onEndChange={(value) => setEndTime(value)}
                   disabled={false}
                   step={0.1}
                 />
