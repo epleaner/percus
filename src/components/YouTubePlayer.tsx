@@ -1,8 +1,14 @@
 import { Component, createSignal, onMount, onCleanup, Show, createEffect } from 'solid-js';
 import { searchYouTubeVideos, type YouTubeSearchResult } from '../utils/youtubeSearch';
 import DualRangeSlider from './DualRangeSlider';
+import { globalPlaybackClock } from '../utils/playbackClock';
+import { type PlayerState } from '../utils/urlState';
 
-interface YouTubePlayerProps {}
+interface YouTubePlayerProps {
+  playerId: number;
+  initialState?: PlayerState;
+  onStateChange?: (state: PlayerState) => void;
+}
 
 // YouTube IFrame API types
 declare global {
@@ -12,18 +18,19 @@ declare global {
   }
 }
 
-const YouTubePlayer: Component<YouTubePlayerProps> = () => {
-  const [videoUrl, setVideoUrl] = createSignal('');
-  const [videoId, setVideoId] = createSignal<string | null>(null);
+const YouTubePlayer: Component<YouTubePlayerProps> = (props) => {
+  const [videoUrl, setVideoUrl] = createSignal(props.initialState?.videoUrl || '');
+  const [videoId, setVideoId] = createSignal<string | null>(props.initialState?.videoId || null);
   const [player, setPlayer] = createSignal<any>(null);
-  const [startTime, setStartTime] = createSignal(0);
-  const [endTime, setEndTime] = createSignal(0);
+  const [startTime, setStartTime] = createSignal(props.initialState?.startTime || 0);
+  const [endTime, setEndTime] = createSignal(props.initialState?.endTime || 0);
   const [videoDuration, setVideoDuration] = createSignal(0);
   const [isLooping, setIsLooping] = createSignal(true);
-  const [isPlaying, setIsPlaying] = createSignal(false);
+  const [isPlaying, setIsPlaying] = createSignal(props.initialState?.isPlaying || false);
+  const [loopLength, setLoopLength] = createSignal(0);
   const [isApiReady, setIsApiReady] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
-  const [searchQuery, setSearchQuery] = createSignal('');
+  const [searchQuery, setSearchQuery] = createSignal(props.initialState?.searchQuery || '');
   const [searchResults, setSearchResults] = createSignal<YouTubeSearchResult[]>([]);
   const [isSearching, setIsSearching] = createSignal(false);
   const [isLoadingMore, setIsLoadingMore] = createSignal(false);
@@ -49,28 +56,52 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
     return null;
   };
 
+  // Subscribe to global clock for play/pause synchronization
+  let playUnsubscribe: (() => void) | null = null;
+  let pauseUnsubscribe: (() => void) | null = null;
+
   // Load YouTube IFrame API
   onMount(() => {
     if (window.YT && window.YT.Player) {
       setIsApiReady(true);
-      return;
+    } else {
+      const tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      const firstScriptTag = document.getElementsByTagName('script')[0];
+      firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
+
+      window.onYouTubeIframeAPIReady = () => {
+        setIsApiReady(true);
+      };
     }
 
-    const tag = document.createElement('script');
-    tag.src = 'https://www.youtube.com/iframe_api';
-    const firstScriptTag = document.getElementsByTagName('script')[0];
-    firstScriptTag.parentNode?.insertBefore(tag, firstScriptTag);
+    // Subscribe to global clock play/pause events
+    playUnsubscribe = globalPlaybackClock.subscribePlay(() => {
+      if (player() && !isPlaying()) {
+        // When global play is triggered, start from beginning of loop
+        const start = startTime();
+        player().seekTo(start, true);
+        player().playVideo();
+      }
+    });
 
-    window.onYouTubeIframeAPIReady = () => {
-      setIsApiReady(true);
-    };
+    pauseUnsubscribe = globalPlaybackClock.subscribePause(() => {
+      if (player() && isPlaying()) {
+        player().pauseVideo();
+      }
+    });
+  });
+
+  onCleanup(() => {
+    if (playUnsubscribe) playUnsubscribe();
+    if (pauseUnsubscribe) pauseUnsubscribe();
   });
 
   // Initialize player when video ID is set and API is ready
   const initializePlayer = () => {
     if (!isApiReady() || !videoId()) return;
 
-    const playerElement = document.getElementById('youtube-player');
+    const playerElement = document.getElementById(`youtube-player-${props.playerId}`);
     if (!playerElement) return;
 
     // Destroy existing player if any
@@ -86,7 +117,7 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
     // Clear the container
     playerElement.innerHTML = '';
 
-    const ytPlayer = new window.YT.Player('youtube-player', {
+    const ytPlayer = new window.YT.Player(`youtube-player-${props.playerId}`, {
       videoId: videoId()!,
       playerVars: {
         autoplay: 0,
@@ -106,7 +137,40 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
           const duration = ytPlayer.getDuration();
           if (duration && duration > 0) {
             setVideoDuration(duration);
-            setEndTime(duration);
+            
+            // Set random 1-5 second loop segment
+            const loopDuration = Math.floor(Math.random() * 5) + 1; // 1-5 seconds
+            const maxStart = Math.max(0, duration - loopDuration);
+            const randomStart = Math.floor(Math.random() * maxStart);
+            
+            // Ensure loop length is a multiple of 1 second
+            const roundedStart = Math.floor(randomStart);
+            const roundedEnd = roundedStart + loopDuration;
+            
+            // Use initial state if available, otherwise use random
+            const finalStart = props.initialState?.startTime !== undefined && props.initialState.startTime > 0
+              ? props.initialState.startTime
+              : roundedStart;
+            const finalEnd = props.initialState?.endTime !== undefined && props.initialState.endTime > 0
+              ? props.initialState.endTime
+              : Math.min(roundedEnd, duration);
+            
+            setStartTime(finalStart);
+            setEndTime(finalEnd);
+            setLoopLength(finalEnd - finalStart);
+            
+            // Seek to the start of the loop segment
+            ytPlayer.seekTo(finalStart, true);
+            
+            // If initial state says it should be playing, start playing
+            if (props.initialState?.isPlaying) {
+              setTimeout(() => {
+                globalPlaybackClock.play();
+              }, 100);
+            }
+            
+            notifyStateChange();
+            
           }
           // Auto-start looping
           setIsLooping(true);
@@ -118,11 +182,13 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
           // YouTube player states: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (cued)
           if (event.data === window.YT.PlayerState.PLAYING) {
             setIsPlaying(true);
+            notifyStateChange();
             if (isLooping()) {
               checkLoop();
             }
           } else if (event.data === window.YT.PlayerState.PAUSED) {
             setIsPlaying(false);
+            notifyStateChange();
           } else if (event.data === window.YT.PlayerState.ENDED && isLooping()) {
             // Restart loop when video ends
             const start = startTime();
@@ -168,8 +234,23 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
     }
   };
 
+  // Notify parent of state changes
+  const notifyStateChange = () => {
+    if (props.onStateChange) {
+      props.onStateChange({
+        playerId: props.playerId,
+        searchQuery: searchQuery(),
+        videoUrl: videoUrl(),
+        videoId: videoId() || undefined,
+        startTime: startTime(),
+        endTime: endTime(),
+        isPlaying: isPlaying(),
+      });
+    }
+  };
+
   // Load video by ID
-  const loadVideoById = (id: string) => {
+  const loadVideoById = (id: string, preserveTimeRange: boolean = false) => {
     // Stop loop and destroy existing player
     stopLoopCheck();
     setIsPlaying(false);
@@ -184,11 +265,15 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
 
     setVideoId(id);
     setError(null);
-    setStartTime(0);
-    setEndTime(0);
+    if (!preserveTimeRange) {
+      setStartTime(0);
+      setEndTime(0);
+    }
     setVideoDuration(0);
+    setLoopLength(0);
     setShowSearchResults(false);
     setIsLooping(true);
+    notifyStateChange();
   };
 
   // Handle URL submission
@@ -284,20 +369,27 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
 
   // Handle selecting a video from search results
   const handleSelectVideo = (result: YouTubeSearchResult) => {
+    const url = `https://www.youtube.com/watch?v=${result.videoId}`;
+    setVideoUrl(url);
     loadVideoById(result.videoId);
-    setVideoUrl(`https://www.youtube.com/watch?v=${result.videoId}`);
   };
 
-  // Handle play/pause toggle
+  // Handle play/pause toggle - sync with global clock
   const handlePlayPause = () => {
     if (!player()) return;
 
     if (isPlaying()) {
+      // Pause this player directly and notify global clock
       player().pauseVideo();
+      globalPlaybackClock.pause();
     } else {
-      player().playVideo();
+      // When starting, seek to beginning of loop and use global play
+      const start = startTime();
+      player().seekTo(start, true);
+      globalPlaybackClock.play();
     }
   };
+
 
   // Initialize player when video ID or API readiness changes
   createEffect(() => {
@@ -307,6 +399,17 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
         initializePlayer();
       }, 100);
       return () => clearTimeout(timer);
+    }
+  });
+
+  // Load video from initial state if provided
+  createEffect(() => {
+    if (props.initialState?.videoId && !videoId() && isApiReady()) {
+      const id = props.initialState.videoId;
+      const url = props.initialState.videoUrl || `https://www.youtube.com/watch?v=${id}`;
+      setVideoUrl(url);
+      setVideoId(id);
+      // Player will be initialized by the other effect
     }
   });
 
@@ -344,8 +447,8 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
   });
 
   return (
-    <div class="flex flex-col h-full w-full p-6 gap-4 overflow-hidden">
-      <div class="flex flex-col gap-4 flex-1 min-h-0">
+    <div class="flex flex-col h-full w-full gap-2 overflow-hidden">
+      <div class="flex flex-col gap-2 flex-1 min-h-0">
         {/* Search Section */}
         <div class="flex flex-col gap-2">
           <div class="flex gap-2">
@@ -488,8 +591,12 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
                     if (player() && isPlaying()) {
                       player().seekTo(value, true);
                     }
+                    notifyStateChange();
                   }}
-                  onEndChange={(value) => setEndTime(value)}
+                  onEndChange={(value) => {
+                    setEndTime(value);
+                    notifyStateChange();
+                  }}
                   disabled={false}
                   step={0.1}
                 />
@@ -506,7 +613,7 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
             </div>
 
             <div class="w-full flex-shrink-0" style="aspect-ratio: 16/9;">
-              <div id="youtube-player" class="w-full h-full"></div>
+              <div id={`youtube-player-${props.playerId}`} class="w-full h-full"></div>
             </div>
           </div>
         </Show>
