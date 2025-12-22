@@ -1,4 +1,6 @@
 import { Component, createSignal, onMount, onCleanup, Show, createEffect } from 'solid-js';
+import { searchYouTubeVideos, type YouTubeSearchResult } from '../utils/youtubeSearch';
+import DualRangeSlider from './DualRangeSlider';
 
 interface YouTubePlayerProps {}
 
@@ -16,9 +18,20 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
   const [player, setPlayer] = createSignal<any>(null);
   const [startTime, setStartTime] = createSignal(0);
   const [endTime, setEndTime] = createSignal(0);
-  const [isLooping, setIsLooping] = createSignal(false);
+  const [videoDuration, setVideoDuration] = createSignal(0);
+  const [isLooping, setIsLooping] = createSignal(true);
+  const [isPlaying, setIsPlaying] = createSignal(false);
   const [isApiReady, setIsApiReady] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [searchQuery, setSearchQuery] = createSignal('');
+  const [searchResults, setSearchResults] = createSignal<YouTubeSearchResult[]>([]);
+  const [isSearching, setIsSearching] = createSignal(false);
+  const [isLoadingMore, setIsLoadingMore] = createSignal(false);
+  const [showSearchResults, setShowSearchResults] = createSignal(false);
+  const [sortOrder, setSortOrder] = createSignal<'asc' | 'desc'>('asc');
+  const [nextPageToken, setNextPageToken] = createSignal<string | undefined>(undefined);
+  const [currentThreshold, setCurrentThreshold] = createSignal<number | undefined>(undefined);
+  let resultsContainerRef: HTMLDivElement | undefined;
 
   // Extract video ID from YouTube URL
   const extractVideoId = (url: string): string | null => {
@@ -77,22 +90,44 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
       videoId: videoId()!,
       playerVars: {
         autoplay: 0,
-        controls: 1,
+        controls: 0,
         rel: 0,
         modestbranding: 1,
+        disablekb: 1,
+        fs: 0,
+        iv_load_policy: 3,
       },
       events: {
         onReady: (event: any) => {
-          setPlayer(event.target);
+          const ytPlayer = event.target;
+          setPlayer(ytPlayer);
           setError(null);
+          // Get video duration
+          const duration = ytPlayer.getDuration();
+          if (duration && duration > 0) {
+            setVideoDuration(duration);
+            setEndTime(duration);
+          }
+          // Auto-start looping
+          setIsLooping(true);
         },
         onError: (event: any) => {
           setError('Failed to load video. Please check the URL.');
         },
         onStateChange: (event: any) => {
           // YouTube player states: -1 (unstarted), 0 (ended), 1 (playing), 2 (paused), 3 (buffering), 5 (cued)
-          if (event.data === window.YT.PlayerState.PLAYING && isLooping()) {
-            checkLoop();
+          if (event.data === window.YT.PlayerState.PLAYING) {
+            setIsPlaying(true);
+            if (isLooping()) {
+              checkLoop();
+            }
+          } else if (event.data === window.YT.PlayerState.PAUSED) {
+            setIsPlaying(false);
+          } else if (event.data === window.YT.PlayerState.ENDED && isLooping()) {
+            // Restart loop when video ends
+            const start = startTime();
+            event.target.seekTo(start, true);
+            event.target.playVideo();
           }
         },
       },
@@ -133,6 +168,29 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
     }
   };
 
+  // Load video by ID
+  const loadVideoById = (id: string) => {
+    // Stop loop and destroy existing player
+    stopLoopCheck();
+    setIsPlaying(false);
+    if (player()) {
+      try {
+        player().destroy();
+      } catch (e) {
+        // Ignore errors
+      }
+      setPlayer(null);
+    }
+
+    setVideoId(id);
+    setError(null);
+    setStartTime(0);
+    setEndTime(0);
+    setVideoDuration(0);
+    setShowSearchResults(false);
+    setIsLooping(true);
+  };
+
   // Handle URL submission
   const handleLoadVideo = () => {
     const url = videoUrl().trim();
@@ -147,43 +205,97 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
       return;
     }
 
-    // Stop loop and destroy existing player
-    stopLoopCheck();
-    setIsLooping(false);
-    if (player()) {
-      try {
-        player().destroy();
-      } catch (e) {
-        // Ignore errors
-      }
-      setPlayer(null);
-    }
-
-    setVideoId(id);
-    setError(null);
-    setStartTime(0);
-    setEndTime(0);
+    loadVideoById(id);
   };
 
-  // Handle loop toggle
-  const handleToggleLoop = () => {
+  // Handle search
+  const handleSearch = async (isLoadMore: boolean = false) => {
+    const query = searchQuery().trim();
+    if (!query && !isLoadMore) {
+      setError('Please enter a search query');
+      return;
+    }
+
+    if (isLoadMore) {
+      setIsLoadingMore(true);
+    } else {
+      setIsSearching(true);
+      setSearchResults([]);
+      setNextPageToken(undefined);
+      setCurrentThreshold(undefined);
+    }
+    setError(null);
+
+    try {
+      const response = await searchYouTubeVideos(
+        query,
+        12,
+        isLoadMore ? nextPageToken() : undefined,
+        currentThreshold()
+      );
+      
+      if (response.items.length === 0 && !isLoadMore) {
+        setError('No videos found. Try a different search term.');
+        setSearchResults([]);
+        setShowSearchResults(false);
+      } else {
+        const newResults = isLoadMore 
+          ? [...searchResults(), ...response.items]
+          : response.items;
+        
+        // Sort by view count (ascending by default)
+        const sorted = [...newResults].sort((a, b) => {
+          if (sortOrder() === 'asc') {
+            return a.viewCount - b.viewCount;
+          } else {
+            return b.viewCount - a.viewCount;
+          }
+        });
+        setSearchResults(sorted);
+        setNextPageToken(response.nextPageToken);
+        setCurrentThreshold(response.currentThreshold);
+        setShowSearchResults(true);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to search videos');
+      if (!isLoadMore) {
+        setSearchResults([]);
+      }
+    } finally {
+      setIsSearching(false);
+      setIsLoadingMore(false);
+    }
+  };
+
+  // Handle infinite scroll
+  const handleScroll = () => {
+    if (!resultsContainerRef || isLoadingMore() || !nextPageToken()) return;
+    
+    const container = resultsContainerRef;
+    const scrollTop = container.scrollTop;
+    const scrollHeight = container.scrollHeight;
+    const clientHeight = container.clientHeight;
+    
+    // Load more when within 200px of bottom
+    if (scrollHeight - scrollTop - clientHeight < 200) {
+      handleSearch(true);
+    }
+  };
+
+  // Handle selecting a video from search results
+  const handleSelectVideo = (result: YouTubeSearchResult) => {
+    loadVideoById(result.videoId);
+    setVideoUrl(`https://www.youtube.com/watch?v=${result.videoId}`);
+  };
+
+  // Handle play/pause toggle
+  const handlePlayPause = () => {
     if (!player()) return;
 
-    const newLooping = !isLooping();
-    setIsLooping(newLooping);
-
-    if (newLooping) {
-      const start = startTime();
-      const end = endTime();
-      if (end > start && end > 0) {
-        player().seekTo(start, true);
-        startLoopCheck();
-      } else {
-        setError('Please set a valid time range (end time must be greater than start time)');
-        setIsLooping(false);
-      }
+    if (isPlaying()) {
+      player().pauseVideo();
     } else {
-      stopLoopCheck();
+      player().playVideo();
     }
   };
 
@@ -200,10 +312,22 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
 
   // Update loop check when looping state changes
   createEffect(() => {
-    if (isLooping() && player()) {
+    if (isLooping() && player() && videoDuration() > 0) {
       startLoopCheck();
     } else {
       stopLoopCheck();
+    }
+  });
+
+  // Auto-start loop when player and duration are ready
+  createEffect(() => {
+    if (player() && videoDuration() > 0 && isLooping()) {
+      const start = startTime();
+      const end = endTime();
+      if (end > start && end > 0) {
+        player().seekTo(start, true);
+        startLoopCheck();
+      }
     }
   });
 
@@ -220,12 +344,39 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
   });
 
   return (
-    <div class="flex flex-col h-full w-full p-6 gap-4">
-      <div class="flex flex-col gap-4">
+    <div class="flex flex-col h-full w-full p-6 gap-4 overflow-hidden">
+      <div class="flex flex-col gap-4 flex-1 min-h-0">
+        {/* Search Section */}
+        <div class="flex flex-col gap-2">
+          <div class="flex gap-2">
+            <input
+              type="text"
+              placeholder="Search for low-view videos..."
+              value={searchQuery()}
+              onInput={(e) => setSearchQuery(e.currentTarget.value)}
+              onKeyPress={(e) => {
+                if (e.key === 'Enter') {
+                  handleSearch();
+                }
+              }}
+              class="input flex-1"
+              disabled={isSearching()}
+            />
+            <button 
+              onClick={handleSearch} 
+              class="btn btn-primary"
+              disabled={isSearching()}
+            >
+              {isSearching() ? 'Searching...' : 'Search'}
+            </button>
+          </div>
+        </div>
+
+        {/* URL Input Section */}
         <div class="flex gap-2">
           <input
             type="text"
-            placeholder="Enter YouTube URL"
+            placeholder="Or enter YouTube URL"
             value={videoUrl()}
             onInput={(e) => setVideoUrl(e.currentTarget.value)}
             onKeyPress={(e) => {
@@ -244,45 +395,117 @@ const YouTubePlayer: Component<YouTubePlayerProps> = () => {
           <div class="text-sm text-red-500">{error()}</div>
         </Show>
 
-        <Show when={videoId()}>
-          <div class="flex flex-col gap-4">
-            <div class="flex gap-4 items-center">
-              <div class="flex flex-col gap-1">
-                <label class="text-xs text-fg-muted">Start Time (seconds)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={startTime()}
-                  onInput={(e) => setStartTime(parseFloat(e.currentTarget.value) || 0)}
-                  class="input w-32"
-                  disabled={isLooping()}
-                />
+        {/* Search Results */}
+        <Show when={showSearchResults() && searchResults().length > 0}>
+          <div class="flex flex-col gap-2">
+            <div class="flex items-center justify-between">
+              <div class="text-sm text-fg-muted">
+                Search Results ({searchResults().length})
+                <Show when={currentThreshold() !== undefined}>
+                  <span class="text-xs text-fg-subtle ml-1">
+                    (max {currentThreshold()?.toLocaleString()} views)
+                  </span>
+                </Show>
               </div>
-              <div class="flex flex-col gap-1">
-                <label class="text-xs text-fg-muted">End Time (seconds)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={endTime()}
-                  onInput={(e) => setEndTime(parseFloat(e.currentTarget.value) || 0)}
-                  class="input w-32"
-                  disabled={isLooping()}
-                />
-              </div>
-              <div class="flex items-end">
-                <button
-                  onClick={handleToggleLoop}
-                  class={`btn ${isLooping() ? 'btn-secondary' : 'btn-primary'}`}
-                  disabled={!player() || endTime() <= startTime() || endTime() <= 0}
+              <div class="flex items-center gap-2">
+                <label class="text-xs text-fg-muted">Sort by views:</label>
+                <select
+                  value={sortOrder()}
+                  onChange={(e) => {
+                    const order = e.currentTarget.value as 'asc' | 'desc';
+                    setSortOrder(order);
+                    const sorted = [...searchResults()].sort((a, b) => {
+                      if (order === 'asc') {
+                        return a.viewCount - b.viewCount;
+                      } else {
+                        return b.viewCount - a.viewCount;
+                      }
+                    });
+                    setSearchResults(sorted);
+                  }}
+                  class="input text-xs py-1 px-2"
                 >
-                  {isLooping() ? 'Stop Loop' : 'Start Loop'}
-                </button>
+                  <option value="asc">Ascending</option>
+                  <option value="desc">Descending</option>
+                </select>
               </div>
             </div>
+            <div 
+              ref={resultsContainerRef}
+              onScroll={handleScroll}
+              class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 overflow-y-auto max-h-96"
+            >
+              {searchResults().map((result) => (
+                <button
+                  onClick={() => handleSelectVideo(result)}
+                  class="flex gap-3 p-2 border border-border hover:bg-bg-muted transition-colors text-left"
+                >
+                  <img
+                    src={result.thumbnail}
+                    alt={result.title}
+                    class="w-24 h-18 object-cover flex-shrink-0"
+                  />
+                  <div class="flex flex-col gap-1 min-w-0 flex-1">
+                    <div class="text-xs font-medium text-fg overflow-hidden" style="display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;">
+                      {result.title}
+                    </div>
+                    <div class="text-xs text-fg-muted truncate">
+                      {result.channelTitle}
+                    </div>
+                    <div class="text-xs text-fg-subtle">
+                      {result.viewCount.toLocaleString()} views
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+            <Show when={nextPageToken() && !isLoadingMore()}>
+              <button
+                onClick={() => handleSearch(true)}
+                class="btn btn-secondary w-full"
+              >
+                Load More
+              </button>
+            </Show>
+            <Show when={isLoadingMore()}>
+              <div class="text-center text-xs text-fg-muted py-2">Loading more...</div>
+            </Show>
+          </div>
+        </Show>
 
-            <div class="w-full" style="aspect-ratio: 16/9;">
+        <Show when={videoId()}>
+          <div class="flex flex-col gap-4 flex-1 min-h-0">
+            <Show when={videoDuration() > 0}>
+              <div class="flex flex-col gap-2">
+                <label class="text-xs text-fg-muted">Loop Range</label>
+                <DualRangeSlider
+                  min={0}
+                  max={videoDuration()}
+                  startValue={startTime()}
+                  endValue={endTime()}
+                  onStartChange={(value) => {
+                    setStartTime(value);
+                    if (player() && isPlaying()) {
+                      player().seekTo(value, true);
+                    }
+                  }}
+                  onEndChange={(value) => setEndTime(value)}
+                  disabled={false}
+                  step={0.1}
+                />
+              </div>
+            </Show>
+            <div class="flex items-center gap-2">
+              <button
+                onClick={handlePlayPause}
+                class="btn btn-primary"
+                disabled={!player() || videoDuration() === 0}
+              >
+                {isPlaying() ? 'Pause' : 'Play'}
+              </button>
+            </div>
+
+            <div class="w-full flex-shrink-0" style="aspect-ratio: 16/9;">
               <div id="youtube-player" class="w-full h-full"></div>
             </div>
           </div>

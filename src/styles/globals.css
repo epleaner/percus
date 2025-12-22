@@ -88,6 +88,7 @@
   .btn-primary {
     @apply bg-accent text-xs;
     @apply hover:bg-accent-hover;
+    color: hsl(var(--bg));
   }
 
   .btn-secondary {
