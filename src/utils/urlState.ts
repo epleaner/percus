@@ -42,3 +42,4 @@ export function setStateInURL(state: GridState): void {
   window.history.replaceState({}, '', url.toString());
 }
 
+
